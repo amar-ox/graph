@@ -104,47 +104,82 @@ CALL custom.traverse(id(tf),id(np)) YIELD ignored
 RETURN null AS ignored", 'write', [['ignored', 'STRING']], [['fwdstate_id', 'INTEGER'],['port_id', 'INTEGER']], '')
 ==========================================================================
 
-CALL gds.graph.project(
-  'fwd-graph',
-  ['MyLabel'],
-  { nodeProperties: ['prop1', 'prop2] },
-  ['MY_TYPE'],
-  { relationshipProperties: ['prop1', 'prop2] })
-  YIELD graphName AS graph, nodeProjection, nodeCount AS nodes, relationshipProjection, relationshipCount AS rels
 
-
-CALL gds.graph.project(
-  'fwd',
-  {
-     <projected-label>: {
-        label: State,
-        properties: [<neo4j-property-key>, <neo4j-property-key>, ...]
-     }, 
-     <projected-label>: {
-        label: Port,
-        properties: [<neo4j-property-key>, <neo4j-property-key>, ...]
-     }
-  },
-  ['FWD_STATE']
-)
-YIELD graphName AS graph, nodeProjection, nodeCount AS nodes, relationshipProjection, relationshipCount AS rels
-
--------------------------
-MATCH (source) WHERE source:Person OR source:Book
-OPTIONAL MATCH (source)-[r:KNOWS|READ]->(target)
-WHERE target:Person OR target:Book
+-------------------------ports and states projection -----------------------------------------
+MATCH (source:Port)-[r:FWD_STATE]->(target:State)
 WITH gds.graph.project(
-  'personsAndBooks',
-  source,
+  'portAndState',
   target,
+  source,
   {
-    sourceNodeLabels: labels(source),
-    targetNodeLabels: labels(target),
     relationshipType: type(r)
   }
 ) AS g
 RETURN g.graphName AS graph, g.nodeCount AS nodes, g.relationshipCount AS rels
 
 -------------------
+CALL gds.pageRank.stream('portAndState')
+YIELD nodeId, score
+RETURN nodeId as portId, score
+ORDER BY score DESC, portId 
+
+
+------------------------- one tree projection -----------------------------------------
+MATCH (source:State {originPort: 11})-[r:FWD_NEXT]->(target:State)
+WITH gds.graph.project(
+  'tree11',
+  source,
+  target,
+  {
+    relationshipType: type(r)
+  }
+) AS g
+RETURN g.graphName AS graph, g.nodeCount AS nodes, g.relationshipCount AS rels
+-----------------
+CALL gds.betweenness.stream('tree11')
+YIELD nodeId, score
+RETURN nodeId, score
+ORDER BY score DESC
+===========================================================================
+
+
+
+------------------- compute betweenness for each active port -----------------------
+MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
+WITH DISTINCT r,p
+CALL gds.betweenness.stream('tree'+id(p))
+YIELD nodeId, score
+WITH r, p, nodeId, score ORDER BY score DESC
+WITH r, p, collect({id:nodeId, sc:score}) AS results
+WITH r, p, head(results) AS res
+MATCH (s:State)-[]-(pp:Port)-[]-(rr:Router) WHERE id(s) = res.id
+RETURN r.name+','+p.name AS origPort, rr.name+','+pp.name AS btwPort ORDER BY origPort
+
+
+===================================== Represent Paths ===========================
+MATCH (s:State)<-[:ORIG_STATE]-()
+MATCH path = (s)-[:FWD_NEXT*]->(e:State) WHERE NOT (e)-[:FWD_NEXT]->()
+WITH collect(nodes(path)) AS nodePaths
+UNWIND nodePaths AS nodes
+WITH nodes, size(nodes)/2.0 - 1 AS l, nodes[0] AS root, nodes[-1] AS leaf
+MATCH (p:Port)-[:FWD_STATE]->(state:State)
+WHERE state IN nodes
+WITH root, leaf, l, collect(DISTINCT p) AS connectedPorts 
+MERGE (path:Path {origin: root.originPort, length: l, dest: id(leaf)})
+FOREACH (port IN connectedPorts | MERGE (path)-[:CONTAINS]->(port))
+RETURN path
+
+============================== Path and Ports projection =======================
+
+
+
+
+
+===========================================================================
+CALL gds.graph.list()
+YIELD graphName, nodeCount, relationshipCount
+RETURN graphName, nodeCount, relationshipCount
+ORDER BY graphName ASC
+
 CALL gds.graph.drop('fwd-graph') YIELD graphName;
 
