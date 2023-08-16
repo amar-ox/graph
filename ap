@@ -1,0 +1,92 @@
+MATCH (p:Port)-[:LINKS_TO]-()
+WITH DISTINCT p as port
+MATCH (port)-[]-(ec:EC) RETURN port, ec
+
+
+MATCH (p:Port)-[]-(ec:EC) RETURN p, ec
+
+
+CALL gds.nodeSimilarity.stream('portsAndEcs')
+YIELD node1, node2, similarity
+WITH gds.util.asNode(node1) AS port1, gds.util.asNode(node2) AS port2, similarity
+MATCH (r1:Router)-[]->(port1)
+MATCH (r2:Router)-[]->(port2)
+RETURN r1.name+'/'+port1.name AS p1, r2.name+'/'+port2.name AS p2, similarity 
+ORDER BY similarity DESCENDING
+
+CALL gds.nodeSimilarity.stream('portsAndEcs')
+YIELD node1, node2, similarity
+RETURN gds.util.asNode(node1).name AS Person1, gds.util.asNode(node2).name AS Person2, similarity
+ORDER BY similarity DESCENDING, Person1, Person2
+
+CALL gds.nodeSimilarity.stream('nodesAndEcs')
+YIELD node1, node2, similarity
+RETURN gds.util.asNode(node1).name AS Person1, gds.util.asNode(node2).name AS Person2, similarity
+ORDER BY similarity DESCENDING, Person1, Person2
+
+MATCH (r:Router)-[:HAS_EC]->(ec:EC)
+RETURN r, ec
+
+
+
+
+============================================ misc ====================================================
+MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
+WITH DISTINCT r, p
+CREATE (p)-[:ORIG_STATE {tmp:true}]->(s:FwdState {originPort: id(p), ecs: [], complement:true, tmp: true, visited: [id(p)]})
+WITH s, p
+CALL custom.traverse(id(s),id(p)) YIELD ignored
+RETURN null as ignored
+----------------
+MATCH (r:Router {name: 'coza_rtr'})-[:HAS_PORT]->(p:Port {name: 'te2/1'})
+WITH DISTINCT p
+CREATE (p)-[:ORIG_STATE {tmp:true}]->(s:FwdState {originPort: id(p), ecs: [], complement:true, tmp: true, visited: [id(p)]})
+WITH s,p
+CALL custom.traverse(id(s),id(p)) YIELD ignored
+RETURN null as ignored
+----------------
+CALL apoc.custom.asProcedure("traverse", 
+"WITH $fwdstate_id AS fwdstate_id, $port_id AS port_id 
+MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:ORIG_STATE|TRANSFER_STATE]->(s:FwdState) WHERE id(p)=port_id AND id(s)=fwdstate_id
+CALL {
+    WITH p, s
+    OPTIONAL MATCH (p)-[:INACL]->(inacl:InAcl)-[:HAS_EC]->(ec:EC)
+    WITH CASE inacl WHEN null THEN ap.intersect(s.ecs,s.complement,[],true) ELSE ap.intersect(s.ecs,s.complement,collect(ec.v),inacl.complement) END AS xfwdaps
+    WITH tail(xfwdaps) as fwdaps, CASE head(xfwdaps) WHEN 0 THEN false WHEN 1 THEN true END AS fwdapsComp
+    WITH fwdaps, fwdapsComp WHERE NOT (size(fwdaps) = 0 AND fwdapsComp = false)
+    RETURN fwdaps, fwdapsComp
+}
+WITH r, p, s, fwdaps, fwdapsComp
+CALL {
+    WITH r, p, fwdaps, fwdapsComp
+    MATCH (r)-[:HAS_PORT]->(pi:Port)-[:FWD]->(f:Fwd)-[:HAS_EC]->(ec:EC) WHERE pi.name <> p.name
+    WITH DISTINCT pi, ap.intersect(fwdaps,fwdapsComp,collect(ec.v),f.complement) as fwdaps2
+    WITH pi, fwdaps2 WHERE NOT (size(fwdaps2) = 1 AND head(fwdaps2) = 0)
+    RETURN pi AS outport, fwdaps2
+    UNION
+    WITH r, p, fwdaps, fwdapsComp
+    MATCH (r)-[:HAS_VLAN]->(vi:Vlan)-[:FWD]->(f:Fwd)-[:HAS_EC]->(ec:EC) WHERE vi.name <> p.name
+    WITH DISTINCT p, vi, ap.intersect(fwdaps,fwdapsComp,collect(ec.v),f.complement) as fwdaps2
+    WITH p, vi, fwdaps2 WHERE NOT (size(fwdaps2) = 1 AND head(fwdaps2) = 0)
+    MATCH (vi)-[:IS_VLANPORT]-(pi:Port) WHERE pi.name <> p.name
+    RETURN pi as outport, fwdaps2
+}
+WITH s, outport, ap.unions(COLLECT(fwdaps2)) AS fwdaps2
+WITH s, outport, tail(fwdaps2) as fwdaps3, CASE head(fwdaps2) WHEN 0 THEN false WHEN 1 THEN true END AS fwdaps3Comp 
+WITH s, outport, fwdaps3, fwdaps3Comp WHERE NOT (size(fwdaps3) = 0 AND fwdaps3Comp = false)
+OPTIONAL MATCH (outport)-[:OUTACL]->(outacl:OutAcl)-[:HAS_EC]->(ec:EC)
+WITH DISTINCT s, outport, fwdaps3, fwdaps3Comp, CASE outacl WHEN null THEN ap.intersect(fwdaps3,fwdaps3Comp,[],true) ELSE ap.intersect(fwdaps3,fwdaps3Comp,collect(ec.v),outacl.complement) END AS xfwdaps4
+WITH s, outport, tail(xfwdaps4) as fwdaps4, CASE head(xfwdaps4) WHEN 0 THEN false WHEN 1 THEN true END AS fwdaps4Comp 
+WITH s, outport, fwdaps4, fwdaps4Comp WHERE NOT (size(fwdaps4) = 0 AND fwdaps4Comp = false)
+WITH s, outport, fwdaps4, fwdaps4Comp
+CREATE (s)-[:FWD_NEXT {tmp:true}]->(nxt:FwdState {ecs: fwdaps4, complement: fwdaps4Comp, originPort: s.originPort, visited: s.visited+id(outport), tmp:true})<-[:FWD_STATE {tmp:true}]-(outport)
+REMOVE s.flag
+SET nxt.flag = CASE (size(nxt.visited) = size(apoc.coll.toSet(nxt.visited))) WHEN false THEN CASE s.originPort IN tail(nxt.visited) WHEN true THEN 'loop' WHEN false THEN 'branch loop' END WHEN true THEN 'dead' END
+WITH outport, nxt WHERE nxt.flag = 'dead'
+MATCH (outport)-[:LINKS_TO]-(np:Port)
+REMOVE nxt.flag
+WITH DISTINCT np, nxt 
+CREATE (nxt)-[:FWD_NEXT {tmp:true}]->(tf:FwdState {ecs: nxt.ecs, complement: nxt.complement, originPort: nxt.originPort, visited: nxt.visited+id(np), flag: 'dead', tmp:true})<-[:TRANSFER_STATE {tmp:true}]-(np)
+WITH np, tf
+CALL custom.traverse(id(tf),id(np)) YIELD ignored
+RETURN null AS ignored", 'write', [['ignored', 'STRING']], [['fwdstate_id', 'INTEGER'],['port_id', 'INTEGER']], '')
