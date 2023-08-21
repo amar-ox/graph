@@ -18,7 +18,7 @@ RETURN port, tree, flag
 MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
 WITH DISTINCT r,p
 WITH collect(r.name+','+p.name) as ports
-CALL trees.compute(ports, false) YIELD time
+CALL trees.compute(ports, false, false) YIELD time
 RETURN time
 
 ===================== get trees ==========================
@@ -105,7 +105,7 @@ RETURN path
 port similarity ...
 
 
-============================== Port -> EC (regardless of state merge) =======================
+============================== Port -> EC (w/o state merge) =======================
 MATCH (p:Port)-[]->(s:State)-[:HAS_EC]->(ec:EC)
 WHERE NOT (s)-[:FWD_NEXT]->()
 WITH DISTINCT p, collect(DISTINCT ec) AS portEcs
@@ -130,7 +130,7 @@ RETURN r1.name+'/'+port1.name AS p1, r2.name+'/'+port2.name AS p2, similarity
 ORDER BY similarity DESCENDING
 
 
-============================== Router -> EC (regardless of state merge) =======================
+============================== Router -> EC (without state merge) =======================
 MATCH (r:Router)-[]->(p:Port)-[:HAS_EC]->(ec:EC)
 WITH DISTINCT r, collect(DISTINCT ec) AS routerEcs
 UNWIND routerEcs AS ecs
