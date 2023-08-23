@@ -43,6 +43,87 @@ RETURN r, COLLECT(DISTINCT allEC.v) AS MissingECs
 
 
 =====================================================================================================================
+============================================ Compute trees ====================================================
+MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
+WITH DISTINCT r, p
+CREATE (p)-[:ORIG_STATE]->(s:State {originPort: id(p), ecs: [], complement:true, visited: [id(p)]})
+WITH s, p
+CALL custom.traverse(id(s),id(p)) YIELD ignored
+RETURN null as ignored
+----------------
+CALL apoc.custom.asProcedure("traverse", 
+"WITH $state_id AS state_id, $port_id AS port_id 
+MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[]->(s:State) WHERE id(p)=port_id AND id(s)=state_id
+CALL {
+    WITH p, s
+    OPTIONAL MATCH (p)-[:INACL]->(inacl:InAcl)-[:HAS_EC]->(ec:EC)
+    WITH CASE inacl WHEN null THEN ap.intersect(s.ecs,s.complement,[],true) ELSE ap.intersect(s.ecs,s.complement,collect(ec.v),inacl.complement) END AS xfwdaps
+    WITH tail(xfwdaps) as fwdaps, CASE head(xfwdaps) WHEN 0 THEN false WHEN 1 THEN true END AS fwdapsComp
+    WITH DISTINCT fwdaps, fwdapsComp WHERE NOT (size(fwdaps) = 0 AND fwdapsComp = false)
+    RETURN fwdaps, fwdapsComp
+}
+WITH r, p, s, fwdaps, fwdapsComp
+CALL {
+    WITH r, p, fwdaps, fwdapsComp
+    MATCH (r)-[:HAS_PORT]->(pi:Port)-[:FWD]->(f:Fwd)-[:HAS_EC]->(ec:EC) WHERE pi.name <> p.name
+    WITH DISTINCT pi, f, ap.intersect(fwdaps,fwdapsComp,collect(ec.v),f.complement) as fwdaps2
+    WITH pi, fwdaps2 WHERE NOT (size(fwdaps2) = 1 AND head(fwdaps2) = 0)
+    RETURN pi AS outport, fwdaps2
+    UNION
+    WITH r, p, fwdaps, fwdapsComp
+    MATCH (r)-[:HAS_VLAN]->(vi:Vlan)-[:FWD]->(f:Fwd)-[:HAS_EC]->(ec:EC) WHERE vi.name <> p.name
+    WITH DISTINCT p, vi, f, ap.intersect(fwdaps,fwdapsComp,collect(ec.v),f.complement) as fwdaps2
+    WITH DISTINCT p, vi, fwdaps2 WHERE NOT (size(fwdaps2) = 1 AND head(fwdaps2) = 0)
+    MATCH (vi)<-[:IS_VLANPORT]-(pi:Port) WHERE pi.name <> p.name
+    RETURN pi as outport, fwdaps2
+}
+WITH DISTINCT s, outport, ap.unions(COLLECT(fwdaps2)) AS fwdaps2
+WITH DISTINCT  s, outport, tail(fwdaps2) as fwdaps3, CASE head(fwdaps2) WHEN 0 THEN false WHEN 1 THEN true END AS fwdaps3Comp 
+WITH DISTINCT  s, outport, fwdaps3, fwdaps3Comp WHERE NOT (size(fwdaps3) = 0 AND fwdaps3Comp = false)
+OPTIONAL MATCH (outport)-[:OUTACL]->(outacl:OutAcl)-[:HAS_EC]->(ec:EC)
+WITH DISTINCT s, outport, outacl, fwdaps3, fwdaps3Comp, CASE outacl WHEN null THEN ap.intersect(fwdaps3,fwdaps3Comp,[],true) ELSE ap.intersect(fwdaps3,fwdaps3Comp,collect(ec.v),outacl.complement) END AS xfwdaps4
+WITH DISTINCT  s, outport, tail(xfwdaps4) as fwdaps4, CASE head(xfwdaps4) WHEN 0 THEN false WHEN 1 THEN true END AS fwdaps4Comp 
+WITH DISTINCT  s, outport, fwdaps4, fwdaps4Comp WHERE NOT (size(fwdaps4) = 0 AND fwdaps4Comp = false)
+WITH DISTINCT s, outport, fwdaps4, fwdaps4Comp
+CREATE (s)-[:FWD_NEXT]->(nxt:State {ecs: fwdaps4, complement: fwdaps4Comp, originPort: s.originPort, visited: s.visited+id(outport)})<-[:FWD_STATE]-(outport)
+REMOVE s.flag
+SET nxt.flag = CASE (size(nxt.visited) = size(apoc.coll.toSet(nxt.visited))) WHEN false THEN CASE s.originPort IN LAST(nxt.visited) WHEN true THEN 'loop' WHEN false THEN 'branch loop' END WHEN true THEN 'dead' END
+WITH DISTINCT  outport, nxt WHERE nxt.flag = 'dead'
+MATCH (outport)-[:LINKS_TO]-(np:Port)
+REMOVE nxt.flag
+WITH DISTINCT np, nxt 
+CREATE (nxt)-[:FWD_NEXT]->(tf:State {ecs: nxt.ecs, complement: nxt.complement, originPort: nxt.originPort, visited: nxt.visited+id(np)})<-[:FWD_STATE]-(np)
+SET tf.flag = CASE tf.originPort = id(np) WHEN true THEN 'loop' WHEN false THEN 'dead' END
+WITH DISTINCT np, tf WHERE tf.flag = 'dead'
+CALL custom.traverse(id(tf),id(np)) YIELD ignored
+RETURN null AS ignored", 'write', [['ignored', 'STRING']], [['state_id', 'INTEGER'],['port_id', 'INTEGER']], '')
+
+====================== Connect EC nodes ==================================
+MATCH (s:FwdState) WHERE exists(s.flag)
+MATCH (ec:EC) WHERE ec.v IN s.ecs
+WITH DISTINCT s, ec
+CREATE (s)-[:HAS_EC]->(ec)
+
+====================== Merge states ======================================
+MATCH (p:Port)-[]->(s:State)
+WITH p, s.originPort AS origin, COLLECT(s) AS states
+WITH states[0] AS representativeState, states
+UNWIND states[1..] AS stateToRedirect
+MATCH (stateToRedirect)-[r:FWD_NEXT]->(nextState)
+MERGE (representativeState)-[:FWD_NEXT]->(nextState)
+DELETE r;
+MATCH (p:Port)-[]->(s:State)
+WITH p, s.originPort AS origin, COLLECT(s) AS states
+WITH states[0] AS representativeState, states
+UNWIND states[1..] AS stateToRedirect
+MATCH (prevNode)-[r:FWD_NEXT]->(stateToRedirect)
+MERGE (prevNode)-[:FWD_NEXT]->(representativeState)
+DELETE r;
+MATCH (s:State) WHERE NOT (s)-[:FWD_NEXT]-()
+DETACH DELETE s
+
+
+=====================================================================================================================
 ================================= Port <- State (w/o state merge) ===================================================
 MATCH (source:Port)-[r:FWD_STATE]->(target:State)
 WITH gds.graph.project(
