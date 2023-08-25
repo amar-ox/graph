@@ -29,7 +29,7 @@ MATCH (n)<-[]-(p:Port)<-[:HAS_PORT]-(r:Router)
 WITH path, collect({state: n, router:r, port:p}) as ports, e
 RETURN REDUCE(s = '', pr IN ports | s + ' ' + pr.router.name + ',' + pr.port.name) AS paths, e.flag
 
-============== test waypoint ================
+============== count paths per port ================
 MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
 WITH DISTINCT r, p
 MATCH path = ()-[:ORIG_STATE]->(os:State)-[:FWD_NEXT*]->(:State)<-[:FWD_STATE]-(:Port {name: p.name}) WHERE length(path) > 2
@@ -38,8 +38,8 @@ RETURN r.name+','+p.name AS portname, count(path)
 ============== find blackholes ===========================
 MATCH (r:Router)-[:HAS_PORT|HAS_VLAN]->(i)-[:FWD]->(f:Fwd)-[:HAS_EC]->(ec:EC)
 WITH r, COLLECT(ec) AS connectedECs
-MATCH (allEC:EC) WHERE NOT allEC IN connectedECs
-RETURN r, COLLECT(DISTINCT allEC.v) AS MissingECs
+MATCH (missingECs:EC) WHERE NOT missingECs IN connectedECs
+RETURN r AS router, count(DISTINCT missingECs) AS numMissingECs
 
 
 =====================================================================================================================
@@ -51,7 +51,7 @@ WITH s, p
 CALL custom.traverse(id(s),id(p)) YIELD ignored
 RETURN null as ignored
 ----------------
-CALL apoc.custom.asProcedure("traverse", 
+CALL apoc.custom.declareProcedure("traverse(state_id::INT, port_id::INT) :: (ignored::INT)", 
 "WITH $state_id AS state_id, $port_id AS port_id 
 MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[]->(s:State) WHERE id(p)=port_id AND id(s)=state_id
 CALL {
@@ -87,7 +87,7 @@ WITH DISTINCT  s, outport, fwdaps4, fwdaps4Comp WHERE NOT (size(fwdaps4) = 0 AND
 WITH DISTINCT s, outport, fwdaps4, fwdaps4Comp
 CREATE (s)-[:FWD_NEXT]->(nxt:State {ecs: fwdaps4, complement: fwdaps4Comp, originPort: s.originPort, visited: s.visited+id(outport)})<-[:FWD_STATE]-(outport)
 REMOVE s.flag
-SET nxt.flag = CASE (size(nxt.visited) = size(apoc.coll.toSet(nxt.visited))) WHEN false THEN CASE s.originPort IN LAST(nxt.visited) WHEN true THEN 'loop' WHEN false THEN 'branch loop' END WHEN true THEN 'dead' END
+SET nxt.flag = CASE (size(nxt.visited) = size(apoc.coll.toSet(nxt.visited))) WHEN false THEN CASE s.originPort = LAST(nxt.visited) WHEN true THEN 'loop' WHEN false THEN 'branch loop' END WHEN true THEN 'dead' END
 WITH DISTINCT  outport, nxt WHERE nxt.flag = 'dead'
 MATCH (outport)-[:LINKS_TO]-(np:Port)
 REMOVE nxt.flag
@@ -96,10 +96,10 @@ CREATE (nxt)-[:FWD_NEXT]->(tf:State {ecs: nxt.ecs, complement: nxt.complement, o
 SET tf.flag = CASE tf.originPort = id(np) WHEN true THEN 'loop' WHEN false THEN 'dead' END
 WITH DISTINCT np, tf WHERE tf.flag = 'dead'
 CALL custom.traverse(id(tf),id(np)) YIELD ignored
-RETURN null AS ignored", 'write', [['ignored', 'STRING']], [['state_id', 'INTEGER'],['port_id', 'INTEGER']], '')
+RETURN null AS ignored", 'write')
 
 ====================== Connect EC nodes ==================================
-MATCH (s:FwdState) WHERE exists(s.flag)
+MATCH (s:State) WHERE exists(s.flag)
 MATCH (ec:EC) WHERE ec.v IN s.ecs
 WITH DISTINCT s, ec
 CREATE (s)-[:HAS_EC]->(ec)
@@ -138,52 +138,40 @@ RETURN g.graphName AS graph, g.nodeCount AS nodes, g.relationshipCount AS rels
 -------------------
 CALL gds.pageRank.stream('portAndState')
 YIELD nodeId, score
-RETURN nodeId as portId, score
-ORDER BY score DESC, portId
-
-
-================================= State -> State for one tree (with state merge) ====================================
-MATCH (source:State {originPort: 11})-[r:FWD_NEXT]->(target:State)
-WITH gds.graph.project(
-  'tree11',
-  source,
-  target,
-  {
-    relationshipType: type(r)
-  }
-) AS g
-RETURN g.graphName AS graph, g.nodeCount AS nodes, g.relationshipCount AS rels
-----
-CALL gds.betweenness.stream('tree11')
-YIELD nodeId, score
-RETURN nodeId, score
+WITH gds.util.asNode(nodeId) AS port, score
+MATCH (r:Router)-[]->(port)
+RETURN r.name+','+port.name AS portname, score
 ORDER BY score DESC
-----
-MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
-WITH DISTINCT r,p
-CALL gds.betweenness.stream('tree'+id(p))
-YIELD nodeId, score
-WITH r, p, nodeId, score ORDER BY score DESC
-WITH r, p, collect({id:nodeId, sc:score}) AS results
-WITH r, p, head(results) AS res
-MATCH (s:State)-[]-(pp:Port)-[]-(rr:Router) WHERE id(s) = res.id
-RETURN r.name+','+p.name AS origPort, rr.name+','+pp.name AS btwPort ORDER BY origPort
 
 
-===================================== Path -> Port (w/o state merge) ===========================
+===================================== Port -> Path (w/o state merge) ===========================
 MATCH (s:State)<-[:ORIG_STATE]-()
 MATCH path = (s)-[:FWD_NEXT*]->(e:State) WHERE NOT (e)-[:FWD_NEXT]->()
-WITH collect(nodes(path)) AS nodePaths
-UNWIND nodePaths AS nodes
-WITH nodes, size(nodes)/2.0 - 1 AS l, nodes[0] AS root, nodes[-1] AS leaf
-MATCH (p:Port)-[:FWD_STATE]->(state:State)
-WHERE state IN nodes
+WITH collect(nodes(path)) AS pathStates
+UNWIND pathStates AS states
+WITH states, size(states)/2.0 - 1 AS l, states[0] AS root, states[-1] AS leaf
+MATCH (p:Port)-[:FWD_STATE]->(st:State)
+WHERE st IN states
 WITH root, leaf, l, collect(DISTINCT p) AS connectedPorts 
 MERGE (path:Path {origin: root.originPort, length: l, dest: id(leaf)})
-FOREACH (port IN connectedPorts | MERGE (path)-[:CONTAINS]->(port))
-RETURN path
+FOREACH (port IN connectedPorts | MERGE (path)<-[:CONTAINS]-(port))
+RETURN path;
 ----
-port similarity ...
+CALL gds.graph.project(
+    'pathsAndPorts',
+    ['Port', 'Path'],
+    {
+        CONTAINS: {}
+    }
+);
+----
+CALL gds.nodeSimilarity.stream('pathsAndPorts')
+YIELD node1, node2, similarity
+WITH gds.util.asNode(node1) AS port1, gds.util.asNode(node2) AS port2, similarity
+MATCH (r1:Router)-[]->(port1)
+MATCH (r2:Router)-[]->(port2)
+RETURN r1.name+','+port1.name AS p1, r2.name+','+port2.name AS p2, similarity 
+ORDER BY similarity DESC
 
 
 ============================== Port -> EC (w/o state merge) =======================
@@ -208,7 +196,7 @@ WITH gds.util.asNode(node1) AS port1, gds.util.asNode(node2) AS port2, similarit
 MATCH (r1:Router)-[]->(port1)
 MATCH (r2:Router)-[]->(port2)
 RETURN r1.name+'/'+port1.name AS p1, r2.name+'/'+port2.name AS p2, similarity 
-ORDER BY similarity DESCENDING
+ORDER BY similarity DESC
 
 
 ============================== Router -> EC (without state merge) =======================
@@ -219,98 +207,121 @@ MERGE (r)-[:HAS_EC]->(ecs)
 RETURN r
 ----
 CALL gds.graph.project(
-    'nodesAndEcs',
+    'routersAndEcs',
     ['Router', 'EC'],
     {
         HAS_EC: {}
     }
 );
 ----
-CALL gds.nodeSimilarity.stream('nodesAndEcs')
+CALL gds.nodeSimilarity.stream('routersAndEcs')
 YIELD node1, node2, similarity
-RETURN gds.util.asNode(node1).name AS Person1, gds.util.asNode(node2).name AS Person2, similarity
-ORDER BY similarity DESCENDING, Person1, Person2
+RETURN gds.util.asNode(node1).name AS router1, gds.util.asNode(node2).name AS router2, similarity
+ORDER BY similarity DESC
 
 
 ============================== Clustering: Router -> EC ==========================================
-create EC.connections vector ...
+MATCH (r:Router)-[:HAS_EC]->(:EC)
+WITH collect(DISTINCT r) AS routers
+MATCH (ec:EC)
+WITH ec, routers ORDER BY ec.v
+WITH ec, [rt IN routers | CASE WHEN (ec)<-[:HAS_EC]-(rt) THEN 1.0 ELSE 0.0 END] AS connections
+SET ec.rt_connections = connections
 ----
 CALL gds.graph.project(
     'ecsRouters',
     {
       EC: {
-        properties: 'connections'
+        properties: 'rt_connections'
       }
     },
     '*'
 )
 ----
 CALL gds.beta.kmeans.write('ecsRouters', {
-  nodeProperty: 'connections',
+  nodeProperty: 'rt_connections',
   k: 7,
-  writeProperty: 'kmeans'
+  writeProperty: 'rt_kmeans'
 })
 YIELD nodePropertiesWritten
 ----
+MATCH (ec:EC) 
+WITH ec.rt_kmeans AS cluster, collect(ec.v) AS aps
+RETURN cluster, aps ORDER BY cluster ASC
+----
 MATCH (ec:EC)
-WITH ec, 'CLUSTER_'+ec.kmeans AS kmeansValue
+WITH ec, 'CLUSTER_'+ec.rt_kmeans AS kmeansValue
 call apoc.create.addLabels([ id(ec) ], [ kmeansValue ]) yield node
 with node
 return node
-----
-MATCH (ec:EC) 
-WITH labels(ec)[1] AS cluster, collect(ec.v) AS aps
-RETURN cluster, aps
 
 
-============================== Clustering: Port -> EC (active-ports / all-ports) ============================================
+============================== Clustering: Port -> EC (all-ports) ============================================
 MATCH (p:Port)-[:HAS_EC]->(:EC)
+// WHERE (p)-[:LINKS_TO]-()
 WITH collect(DISTINCT p) AS ports
 MATCH (ec:EC)
 WITH ec, ports ORDER BY ec.v
-WITH ec, [port IN ports | CASE WHEN (ec)<-[:HAS_EC]-(port) THEN 1 ELSE 0 END] AS connections
-SET ec.connections = connections
-----
-MATCH (p:Port)-[:HAS_EC]->(:EC)
-WHERE (p)-[:LINKS_TO]-()
-WITH collect(DISTINCT p) AS ports
-MATCH (ec:EC)
-WITH ec, ports ORDER BY ec.v
-WITH ec, [port IN ports | CASE WHEN (ec)<-[:HAS_EC]-(port) THEN 1 ELSE 0 END] AS connections
-SET ec.connections = connections
+WITH ec, [port IN ports | CASE WHEN (ec)<-[:HAS_EC]-(port) THEN 1.0 ELSE 0.0 END] AS connections
+SET ec.pt_connections = connections
 ----
 CALL gds.graph.project(
     'ecsPorts',
     {
       EC: {
-        properties: 'connections'
+        properties: 'pt_connections'
       }
     },
     '*'
 )
 ----
 CALL gds.beta.kmeans.write('ecsPorts', {
-  nodeProperty: 'connections',
-  k: 7,
-  writeProperty: 'kmeans'
+  nodeProperty: 'pt_connections',
+  k: 10,
+  writeProperty: 'pt_kmeans'
 })
 YIELD nodePropertiesWritten
 ----
+MATCH (ec:EC) 
+WITH ec.pt_kmeans AS cluster, collect(ec.v) AS aps
+RETURN cluster, aps ORDER BY cluster ASC
+----
 MATCH (ec:EC)
-WITH ec, 'CLUSTER_'+ec.kmeans AS kmeansValue
+WITH ec, 'CLUSTER_'+ec.pt_kmeans AS kmeansValue
 call apoc.create.addLabels([ id(ec) ], [ kmeansValue ]) yield node
 with node
 return node
+
+================================= State -> State for one tree (with state merge) ====================================
+MATCH (source:State {originPort: 11})-[r:FWD_NEXT]->(target:State)
+MATCH (p:Port)-[:ORIG_STATE]->()
+WITH p LIMIT 1
+MATCH (source:State {originPort: id(p)})-[r:FWD_NEXT]->(target:State)
+WITH gds.graph.project(
+  'onetree',
+  source,
+  target,
+  {
+    relationshipType: type(r)
+  }
+) AS g
+RETURN g.graphName AS graph, g.nodeCount AS nodes, g.relationshipCount AS rels
 ----
-MATCH (ec:EC) 
-WITH labels(ec)[1] AS cluster, collect(ec.v) AS aps
-RETURN cluster, aps
+CALL gds.betweenness.stream('onetree')
+YIELD nodeId, score
+WITH gds.util.asNode(nodeId) AS state, score
+MATCH (r:Router)-[]->(p:Port)-[]->(state)
+RETURN r.name+','+p.name AS portname, score 
+ORDER BY score DESC
+----
+MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
+WITH DISTINCT r,p
+CALL gds.betweenness.stream('tree'+id(p))
+YIELD nodeId, score
+WITH r, p, nodeId, score ORDER BY score DESC
+WITH r, p, collect({id:nodeId, sc:score}) AS results
+WITH r, p, head(results) AS res
+MATCH (s:State)-[]-(pp:Port)-[]-(rr:Router) WHERE id(s) = res.id
+RETURN r.name+','+p.name AS origPort, rr.name+','+pp.name AS btwPort ORDER BY origPort
 
 
-=====================================================================================================
-CALL gds.graph.list()
-YIELD graphName, nodeCount, relationshipCount
-RETURN graphName, nodeCount, relationshipCount
-ORDER BY graphName ASC
-
-CALL gds.graph.drop('fwd-graph') YIELD graphName;

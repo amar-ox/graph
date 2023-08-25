@@ -1,26 +1,11 @@
-MATCH (p:Port)-[:LINKS_TO]-()
-WITH DISTINCT p as port
-MATCH (port)-[]-(ec:EC) RETURN port, ec
+cypher-shell -u neo4j -p 12345 -d apvtest < network.cypher 
+sudo cp neo4j-net-0.0.1-SNAPSHOT.jar /var/lib/neo4j/plugins/
 
-MATCH (p:Port)-[]-(ec:EC) RETURN p, ec
 
-CALL gds.nodeSimilarity.stream('portsAndEcs')
-YIELD node1, node2, similarity
-WITH gds.util.asNode(node1) AS port1, gds.util.asNode(node2) AS port2, similarity
-MATCH (r1:Router)-[]->(port1)
-MATCH (r2:Router)-[]->(port2)
-RETURN r1.name+'/'+port1.name AS p1, r2.name+'/'+port2.name AS p2, similarity 
-ORDER BY similarity DESCENDING
+=====================================================================================================
+CALL gds.graph.list()
+YIELD graphName, nodeCount, relationshipCount
+RETURN graphName, nodeCount, relationshipCount
+ORDER BY graphName ASC
 
-CALL gds.nodeSimilarity.stream('portsAndEcs')
-YIELD node1, node2, similarity
-RETURN gds.util.asNode(node1).name AS Person1, gds.util.asNode(node2).name AS Person2, similarity
-ORDER BY similarity DESCENDING, Person1, Person2
-
-CALL gds.nodeSimilarity.stream('nodesAndEcs')
-YIELD node1, node2, similarity
-RETURN gds.util.asNode(node1).name AS Person1, gds.util.asNode(node2).name AS Person2, similarity
-ORDER BY similarity DESCENDING, Person1, Person2
-
-MATCH (r:Router)-[:HAS_EC]->(ec:EC)
-RETURN r, ec
+CALL gds.graph.drop('fwd-graph') YIELD graphName;
