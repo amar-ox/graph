@@ -29,7 +29,7 @@ MATCH (n)<-[]-(p:Port)<-[:HAS_PORT]-(r:Router)
 WITH path, collect({state: n, router:r, port:p}) as ports, e
 RETURN REDUCE(s = '', pr IN ports | s + ' ' + pr.router.name + ',' + pr.port.name) AS paths, e.flag
 
-============== test active ports waypoint ================
+============== test waypoint ================
 MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
 WITH DISTINCT r, p
 MATCH path = ()-[:ORIG_STATE]->(os:State)-[:FWD_NEXT*]->(:State)<-[:FWD_STATE]-(:Port {name: p.name}) WHERE length(path) > 2
