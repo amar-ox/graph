@@ -36,9 +36,10 @@ MATCH path = ()-[:ORIG_STATE]->(os:State)-[:FWD_NEXT*]->(:State)<-[:FWD_STATE]-(
 RETURN r.name+','+p.name AS portname, count(path)
 
 ============== find blackholes ===========================
-MATCH (r:Router)-[:HAS_PORT|HAS_VLAN]->(i)-[:FWD]->(f:Fwd)-[:HAS_EC]->(ec:EC)
-WITH r, COLLECT(ec) AS connectedECs
-MATCH (missingECs:EC) WHERE NOT missingECs IN connectedECs
+MATCH (r:Router)-[:HAS_PORT|HAS_VLAN]->()-[:FWD]->(f:Fwd)
+MATCH (x:EC) WHERE (f.complement = true AND NOT (f)-[:HAS_EC]->(x)) OR (f.complement = false AND (f)-[:HAS_EC]->(x))
+WITH r, COLLECT(x) AS ecs
+MATCH (missingECs:EC) WHERE NOT missingECs IN ecs
 RETURN r AS router, count(DISTINCT missingECs) AS numMissingECs
 
 

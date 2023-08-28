@@ -7,5 +7,13 @@ CALL gds.graph.list()
 YIELD graphName, nodeCount, relationshipCount
 RETURN graphName, nodeCount, relationshipCount
 ORDER BY graphName ASC
-
+----
 CALL gds.graph.drop('fwd-graph') YIELD graphName;
+
+
+==================================================================================
+CALL apoc.export.cypher.all("all-plain.cypher", {
+    format: "plain",
+    useOptimizations: {type: "UNWIND_BATCH", unwindBatchSize: 20}
+})
+
