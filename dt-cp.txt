@@ -140,32 +140,3 @@ RETURN r,rr
 MATCH path=(l02:Router{name:'leaf02'})-[:HAS_ROUTE]->(route:Route)-[:LEARNED_FROM]-(from_update:BgpUpdate)-[:RECEIVES_UPDATE]-(p:BgpPeer)-[:PEERS_WITH]-(sp:BgpPeer)-[:HAS_BGP_PEER]-(:Ip4Ctp)-[:CONTAINS*2]-(:Ltp)-[:CONTAINS]-(from_router:Router)
 WHERE route.prefix STARTS WITH '10.11.200.0'
 RETURN path
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-==================================================================================
-MATCH ()-[r {simulation: true}]->() DELETE r;
-MATCH (n {simulation: true}) DELETE n;
-==================================================================================
-CALL apoc.export.cypher.all("all-plain.cypher", {
-    format: "plain",
-    useOptimizations: {type: "UNWIND_BATCH", unwindBatchSize: 20}
-})

@@ -73,9 +73,3 @@ WITH packet, egrItf, outAclRule WHERE outAclRule.action = 'ACCEPT'
 MATCH (egrItf)-[:HAS_LINK]->(nh:Ltp)
 CALL custom.trHop(id(packet),id(nh)) YIELD ignored
 RETURN null AS ignored", 'write')
-
-
-
-================ clean forwarding simulation ===============
-MATCH ()-[r {simulation: true}]->() DELETE r;
-MATCH (n {simulation: true}) DELETE n;
