@@ -99,10 +99,14 @@ CALL custom.traverse(id(tf),id(np)) YIELD ignored
 RETURN null AS ignored", 'write')
 
 ====================== Connect EC nodes ==================================
-MATCH (s:State) WHERE exists(s.flag)
+MATCH (s:State) WHERE exists(s.flag) AND s.complement = false
 MATCH (ec:EC) WHERE ec.v IN s.ecs
 WITH DISTINCT s, ec
-CREATE (s)-[:HAS_EC]->(ec)
+CREATE (s)-[:HAS_EC]->(ec);
+MATCH (s:State) WHERE exists(s.flag) AND s.complement = true
+MATCH (ec:EC) WHERE NOT ec.v IN s.ecs
+WITH DISTINCT s, ec
+CREATE (s)-[:HAS_EC]->(ec);
 
 ====================== Merge states ======================================
 MATCH (p:Port)-[]->(s:State)
@@ -172,7 +176,31 @@ MATCH (r1:Router)-[]->(port1)
 MATCH (r2:Router)-[]->(port2)
 RETURN r1.name+','+port1.name AS p1, r2.name+','+port2.name AS p2, similarity 
 ORDER BY similarity DESC
-
+----
+CALL gds.nodeSimilarity.write('pathsAndPorts', {
+    writeRelationshipType: 'SIMILAR_PATH',
+    writeProperty: 'score'
+})
+YIELD nodesCompared, relationshipsWritten
+----
+CALL gds.graph.project(
+    'louvain',
+    'Port',
+    {
+        SIMILAR_PATH: {
+            orientation: 'UNDIRECTED'
+        }
+    },
+    {
+        relationshipProperties: 'score'
+    }
+)
+----
+CALL gds.louvain.stream('louvain', { relationshipWeightProperty: 'score' })
+YIELD nodeId, communityId, intermediateCommunityIds
+WITH gds.util.asNode(nodeId) AS port, communityId
+MATCH (r:Router)-[]->(port)
+RETURN r.name+','+port.name AS portname, communityId ORDER BY communityId ASC
 
 ============================== Port -> EC (w/o state merge) =======================
 MATCH (p:Port)-[]->(s:State)-[:HAS_EC]->(ec:EC)
@@ -197,7 +225,31 @@ MATCH (r1:Router)-[]->(port1)
 MATCH (r2:Router)-[]->(port2)
 RETURN r1.name+'/'+port1.name AS p1, r2.name+'/'+port2.name AS p2, similarity 
 ORDER BY similarity DESC
-
+----
+CALL gds.nodeSimilarity.write('portsAndEcs', {
+    writeRelationshipType: 'SIMILAR_EC',
+    writeProperty: 'score'
+})
+YIELD nodesCompared, relationshipsWritten
+----
+CALL gds.graph.project(
+    'louvain-ec',
+    'Port',
+    {
+        SIMILAR_EC: {
+            orientation: 'UNDIRECTED'
+        }
+    },
+    {
+        relationshipProperties: 'score'
+    }
+)
+----
+CALL gds.louvain.stream('louvain-ec', { relationshipWeightProperty: 'score' })
+YIELD nodeId, communityId, intermediateCommunityIds
+WITH gds.util.asNode(nodeId) AS port, communityId
+MATCH (r:Router)-[]->(port)
+RETURN r.name+','+port.name AS portname, communityId ORDER BY communityId ASC
 
 ============================== Router -> EC (without state merge) =======================
 MATCH (r:Router)-[]->(p:Port)-[:HAS_EC]->(ec:EC)
