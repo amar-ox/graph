@@ -12,6 +12,7 @@ CALL gds.graph.drop('fwd-graph') YIELD graphName;
 
 ----
 CALL db.schema.visualization()
+CALL apoc.meta.graph()
 
 ==================================================================================
 CALL apoc.export.cypher.all("all-plain.cypher", {

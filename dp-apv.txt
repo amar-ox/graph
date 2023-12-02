@@ -1,8 +1,3 @@
-=================== show topology =======================
-MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]->(pp:Port)<-[:HAS_PORT]-(rr:Router)
-CALL apoc.create.vRelationship(r,'LINK',{},rr) YIELD rel
-RETURN r,rel,rr
-
 =================== clean =======================
 MATCH (s:State) DETACH DELETE s
 
@@ -21,13 +16,31 @@ WITH collect(r.name+','+p.name) as ports
 CALL trees.compute(ports, false, false) YIELD time
 RETURN time
 
+===================================================================================================================================
+=================== show topology =======================
+MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]->(pp:Port)<-[:HAS_PORT]-(rr:Router)
+CALL apoc.create.vRelationship(r,'LINK',{},rr) YIELD rel
+RETURN r,rel,rr
+
 ===================== get trees ==========================
 MATCH (s:State)<-[:ORIG_STATE]-()
 MATCH path = (s)-[:FWD_NEXT*]->(e:State) WHERE NOT (e)-[:FWD_NEXT]->()
 UNWIND nodes(path) AS n
 MATCH (n)<-[]-(p:Port)<-[:HAS_PORT]-(r:Router) 
 WITH path, collect({state: n, router:r, port:p}) as ports, e
-RETURN REDUCE(s = '', pr IN ports | s + ' ' + pr.router.name + ',' + pr.port.name) AS paths, e.flag
+RETURN REDUCE(s = '', pr IN ports | s + ' ' + pr.router.name + ',' + pr.port.name) AS paths, e.ecs, e.flag
+
+============== find blackholes ===========================
+MATCH (r:Router)-[:HAS_PORT|HAS_VLAN]->()-[:FWD]->(f:Fwd)
+MATCH (x:EC) WHERE (f.complement = true AND NOT (f)-[:HAS_EC]->(x)) OR (f.complement = false AND (f)-[:HAS_EC]->(x))
+WITH r, COLLECT(x) AS ecs
+MATCH (missingECs:EC) WHERE NOT missingECs IN ecs
+RETURN r AS router, count(DISTINCT missingECs) AS numMissingECs;
+---- 
+// w/o comp:
+MATCH (r:Router)-[:HAS_PORT|HAS_VLAN]->()-[:FWD]->(f:Fwd)-[:HAS_EC]->(x:EC)
+RETURN r, COUNT(x) AS ecs
+
 
 ============== count paths per port ================
 MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
@@ -35,15 +48,38 @@ WITH DISTINCT r, p
 MATCH path = ()-[:ORIG_STATE]->(os:State)-[:FWD_NEXT*]->(:State)<-[:FWD_STATE]-(:Port {name: p.name}) WHERE length(path) > 2
 RETURN r.name+','+p.name AS portname, count(path)
 
-============== find blackholes ===========================
-MATCH (r:Router)-[:HAS_PORT|HAS_VLAN]->()-[:FWD]->(f:Fwd)
-MATCH (x:EC) WHERE (f.complement = true AND NOT (f)-[:HAS_EC]->(x)) OR (f.complement = false AND (f)-[:HAS_EC]->(x))
-WITH r, COLLECT(x) AS ecs
-MATCH (missingECs:EC) WHERE NOT missingECs IN ecs
-RETURN r AS router, count(DISTINCT missingECs) AS numMissingECs
+============== count paths for one port
+MATCH (r:Router {name: 'bbra_rtr'})-[:HAS_PORT]->(p:Port {name: 'te7/1'})
+MATCH path = ()-[:ORIG_STATE]->(os:State)-[:FWD_NEXT*]->(s:State) WHERE (s)<-[:FWD_STATE]-(p)
+RETURN count(path)
 
+============== slice ===============================
+MATCH (r1:Router)-[]->(p1:Port) WHERE r1.name 
+IN ['bbra_rtr', 'bbrb_rtr']
+MATCH (r1)-[]->(p2:Port)
+MATCH (p1:Port)-[:FWD|INACL|OUTACL]->()-[]
+->(ec:EC)<-[]-()<-[:FWD|INACL|OUTACL]-(p2:Port)
+RETURN p1, p2, ec
 
-=====================================================================================================================
+================== w/o complement ================= 
+Verify blackholes (w/o complement)
+```
+MATCH (ec:EC)
+WITH COUNT(ec) AS all
+MATCH (r:Router)-[:HAS_PORT|HAS_VLAN]->()-[:FWD]->(f:Fwd)-[:HAS_EC]->(x:EC)
+WITH all, r, COUNT(x) AS rEcs WHERE rEcs < all
+RETURN r
+```
+
+Verify isolation (w/o complement)
+```
+MATCH (r1:Router)-[]->(p1:Port) WHERE r1.name IN ['bbra_rtr', 'bbrb_rtr']
+MATCH (r1)-[]->(p2:Port)
+MATCH (p1:Port)-[:FWD|INACL|OUTACL]->()-[]->(ec:EC)<-[]-()<-[:FWD|INACL|OUTACL]-(p2:Port)
+RETURN p1, p2, ec
+```
+
+===============================================================================================================
 ============================================ Compute trees ====================================================
 MATCH (r:Router)-[:HAS_PORT]->(p:Port)-[:LINKS_TO]-()
 WITH DISTINCT r, p
@@ -99,16 +135,6 @@ WITH DISTINCT np, tf WHERE tf.flag = 'dead'
 CALL custom.traverse(id(tf),id(np)) YIELD ignored
 RETURN null AS ignored", 'write')
 
-====================== Connect EC nodes ==================================
-MATCH (s:State) WHERE exists(s.flag) AND s.complement = false
-MATCH (ec:EC) WHERE ec.v IN s.ecs
-WITH DISTINCT s, ec
-CREATE (s)-[:HAS_EC]->(ec);
-MATCH (s:State) WHERE exists(s.flag) AND s.complement = true
-MATCH (ec:EC) WHERE NOT ec.v IN s.ecs
-WITH DISTINCT s, ec
-CREATE (s)-[:HAS_EC]->(ec);
-
 ====================== Merge states ======================================
 MATCH (p:Port)-[]->(s:State)
 WITH p, s.originPort AS origin, COLLECT(s) AS states
@@ -125,21 +151,21 @@ MATCH (prevNode)-[r:FWD_NEXT]->(stateToRedirect)
 MERGE (prevNode)-[:FWD_NEXT]->(representativeState)
 DELETE r;
 MATCH (s:State) WHERE NOT (s)-[:FWD_NEXT]-()
-DETACH DELETE s
+DETACH DELETE s;
+
+=====================================================================================================================
+
 
 
 =====================================================================================================================
 ================================= Port <- State (w/o state merge) ===================================================
-MATCH (source:Port)-[r:FWD_STATE]->(target:State)
-WITH gds.graph.project(
-  'portAndState',
-  target,
-  source,
-  {
-    relationshipType: type(r)
-  }
-) AS g
-RETURN g.graphName AS graph, g.nodeCount AS nodes, g.relationshipCount AS rels
+CALL gds.graph.project(
+    'portAndState',
+    ['Port', 'State'],
+    {
+        FWD_STATE: {orientation: 'REVERSE'}
+    }
+);
 -------------------
 CALL gds.pageRank.stream('portAndState')
 YIELD nodeId, score
@@ -253,11 +279,36 @@ MATCH (r:Router)-[]->(port)
 RETURN r.name+','+port.name AS portname, communityId ORDER BY communityId ASC
 
 ============================== Router -> EC (without state merge) =======================
-MATCH (r:Router)-[]->(p:Port)-[:HAS_EC]->(ec:EC)
+// Connect EC nodes
+MATCH (s:State) WHERE exists(s.flag) AND s.complement = false
+MATCH (ec:EC) WHERE ec.v IN s.ecs
+WITH DISTINCT s, ec
+CREATE (s)-[:HAS_EC]->(ec);
+MATCH (s:State) WHERE exists(s.flag) AND s.complement = true
+MATCH (ec:EC) WHERE NOT ec.v IN s.ecs
+WITH DISTINCT s, ec
+CREATE (s)-[:HAS_EC]->(ec);
+----
+MATCH (r:Router)-[]->(p:Port)-[]->(s:State)-[:HAS_EC]->(ec:EC)
+WHERE NOT (s)-[:FWD_NEXT]->()
 WITH DISTINCT r, collect(DISTINCT ec) AS routerEcs
 UNWIND routerEcs AS ecs
 MERGE (r)-[:HAS_EC]->(ecs)
 RETURN r
+----
+// connect ports to ECs
+MATCH (p:Port)-[]->(s:State)-[:HAS_EC]->(ec:EC)
+WHERE NOT (s)-[:FWD_NEXT]->()
+WITH DISTINCT p, collect(DISTINCT ec) AS portEcs
+UNWIND portEcs AS ecs
+MERGE (p)-[:HAS_EC]->(ecs)
+RETURN p;
+// connect routers to ECs
+MATCH (r:Router)-[]->(p:Port)-[:HAS_EC]->(ec:EC)
+WITH DISTINCT r, collect(DISTINCT ec) AS routerEcs
+UNWIND routerEcs AS ecs
+MERGE (r)-[:HAS_EC]->(ecs)
+RETURN r;
 ----
 CALL gds.graph.project(
     'routersAndEcs',
